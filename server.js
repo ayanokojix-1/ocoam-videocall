@@ -44,7 +44,7 @@ if (PROJECT_ENV === 'dev') {
   if (!process.env.DATABASE_URL) {
     throw new Error('DATABASE_URL environment variable is required for production');
   }
-  
+
   db = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
@@ -471,7 +471,7 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(3030, () => {
-  console.log("🚀 Server running on port 3030 with WebSocket support");
+server.listen(7860, () => {
+  console.log("🚀 Server running on port 7860 with WebSocket support");
   console.log(`🗄️ Database mode: ${PROJECT_ENV}`);
 });
