@@ -2,100 +2,59 @@ const express = require("express");
 const { Server } = require("socket.io");
 const http = require("http");
 const cors = require("cors");
-require("dotenv").config()
-// Database setup based on environment
-let db;
-const PROJECT_ENV = process.env.PROJECT_ENV || 'dev';
+const { Pool } = require('pg');
+require("dotenv").config();
 
-if (PROJECT_ENV === 'dev') {
-  // SQLite for development
-  const Database = require("better-sqlite3");
-  db = new Database("../ocoam-backend/dev.db");
-  
-  // SQLite table creation
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS socket_users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id TEXT NOT NULL,
-      socket_id TEXT NOT NULL,
-      name TEXT,
-      room_id TEXT,
-      role TEXT
-    )
-  `);
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS live_classes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT NOT NULL,
-      subject TEXT NOT NULL,
-      access_code TEXT UNIQUE NOT NULL,
-      status TEXT DEFAULT 'scheduled',
-      scheduled_at TEXT, 
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-  
-  console.log("🗄️ Using SQLite database for development");
-} else {
-  // PostgreSQL for production
-  const { Pool } = require('pg');
-  
-  if (!process.env.DATABASE_URL) {
-    throw new Error('DATABASE_URL environment variable is required for production');
-  }
-
-  db = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-  });
-  
-  // PostgreSQL table creation
-  const initTables = async () => {
-    try {
-      await db.query(`
-        CREATE TABLE IF NOT EXISTS socket_users (
-          id SERIAL PRIMARY KEY,
-          user_id TEXT NOT NULL,
-          socket_id TEXT NOT NULL,
-          name TEXT,
-          room_id TEXT,
-          role TEXT
-        )
-      `);
-
-      await db.query(`
-        CREATE TABLE IF NOT EXISTS live_classes (
-          id SERIAL PRIMARY KEY,
-          title TEXT NOT NULL,
-          subject TEXT NOT NULL,
-          access_code TEXT UNIQUE NOT NULL,
-          status TEXT DEFAULT 'scheduled',
-          scheduled_at TEXT, 
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-      `);
-      
-      console.log("🗄️ Using PostgreSQL database for production");
-    } catch (error) {
-      console.error('Error initializing PostgreSQL tables:', error);
-      process.exit(1);
-    }
-  };
-  
-  initTables();
+// PostgreSQL database setup
+if (!process.env.DATABASE_URL) {
+  throw new Error('DATABASE_URL environment variable is required');
 }
+
+const db = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
+
+// PostgreSQL table creation
+const initTables = async () => {
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS socket_users (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        socket_id TEXT NOT NULL,
+        name TEXT,
+        room_id TEXT,
+        role TEXT
+      )
+    `);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS live_classes (
+        id SERIAL PRIMARY KEY,
+        title TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        access_code TEXT UNIQUE NOT NULL,
+        status TEXT DEFAULT 'scheduled',
+        scheduled_at TEXT, 
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    console.log("🗄️ PostgreSQL database initialized successfully");
+  } catch (error) {
+    console.error('Error initializing PostgreSQL tables:', error);
+    process.exit(1);
+  }
+};
+
+initTables();
 
 // Database helper functions
 const dbHelpers = {
   async getSocketId(userId) {
-    if (PROJECT_ENV === 'dev') {
-      const result = db.prepare("SELECT socket_id FROM socket_users WHERE user_id = ?").get(userId);
-      return result?.socket_id;
-    } else {
-      const result = await db.query("SELECT socket_id FROM socket_users WHERE user_id = $1", [userId]);
-      return result.rows[0]?.socket_id;
-    }
+    const result = await db.query("SELECT socket_id FROM socket_users WHERE user_id = $1", [userId]);
+    return result.rows[0]?.socket_id;
   },
   
   async getRoomParticipants(roomId) {
@@ -105,13 +64,8 @@ const dbHelpers = {
     const participants = [];
     
     for (const socketId of roomSet) {
-      let row;
-      if (PROJECT_ENV === 'dev') {
-        row = db.prepare("SELECT user_id, name, role FROM socket_users WHERE socket_id = ?").get(socketId);
-      } else {
-        const result = await db.query("SELECT user_id, name, role FROM socket_users WHERE socket_id = $1", [socketId]);
-        row = result.rows[0];
-      }
+      const result = await db.query("SELECT user_id, name, role FROM socket_users WHERE socket_id = $1", [socketId]);
+      const row = result.rows[0];
       
       if (row) {
         participants.push({
@@ -127,53 +81,29 @@ const dbHelpers = {
   },
   
   async deleteSocketUser(socketId, userId = null) {
-    if (PROJECT_ENV === 'dev') {
-      if (userId) {
-        db.prepare("DELETE FROM socket_users WHERE socket_id = ? OR user_id = ?").run(socketId, userId);
-      } else {
-        db.prepare("DELETE FROM socket_users WHERE socket_id = ?").run(socketId);
-      }
+    if (userId) {
+      await db.query("DELETE FROM socket_users WHERE socket_id = $1 OR user_id = $2", [socketId, userId]);
     } else {
-      if (userId) {
-        await db.query("DELETE FROM socket_users WHERE socket_id = $1 OR user_id = $2", [socketId, userId]);
-      } else {
-        await db.query("DELETE FROM socket_users WHERE socket_id = $1", [socketId]);
-      }
+      await db.query("DELETE FROM socket_users WHERE socket_id = $1", [socketId]);
     }
   },
   
   async insertSocketUser(userId, socketId, name, roomId, role) {
-    if (PROJECT_ENV === 'dev') {
-      db.prepare("INSERT INTO socket_users (user_id, socket_id, name, room_id, role) VALUES (?, ?, ?, ?, ?)").run(userId, socketId, name, roomId, role);
-    } else {
-      await db.query("INSERT INTO socket_users (user_id, socket_id, name, room_id, role) VALUES ($1, $2, $3, $4, $5)", [userId, socketId, name, roomId, role]);
-    }
+    await db.query("INSERT INTO socket_users (user_id, socket_id, name, room_id, role) VALUES ($1, $2, $3, $4, $5)", [userId, socketId, name, roomId, role]);
   },
   
   async getSocketUser(socketId) {
-    if (PROJECT_ENV === 'dev') {
-      return db.prepare("SELECT * FROM socket_users WHERE socket_id = ?").get(socketId);
-    } else {
-      const result = await db.query("SELECT * FROM socket_users WHERE socket_id = $1", [socketId]);
-      return result.rows[0];
-    }
+    const result = await db.query("SELECT * FROM socket_users WHERE socket_id = $1", [socketId]);
+    return result.rows[0];
   },
   
   async updateSocketUserName(newName, socketId) {
-    if (PROJECT_ENV === 'dev') {
-      db.prepare("UPDATE socket_users SET name = ? WHERE socket_id = ?").run(newName, socketId);
-    } else {
-      await db.query("UPDATE socket_users SET name = $1 WHERE socket_id = $2", [newName, socketId]);
-    }
+    await db.query("UPDATE socket_users SET name = $1 WHERE socket_id = $2", [newName, socketId]);
   },
   
   async updateClassStatus(status, accessCode) {
-    if (PROJECT_ENV === 'dev') {
-      return db.prepare("UPDATE live_classes SET status = ? WHERE access_code = ?").run(status, accessCode);
-    } else {
-      const result = await db.query("UPDATE live_classes SET status = $1 WHERE access_code = $2", [status, accessCode]);
-      return result;
-    }
+    const result = await db.query("UPDATE live_classes SET status = $1 WHERE access_code = $2", [status, accessCode]);
+    return result;
   }
 };
 
@@ -211,9 +141,7 @@ app.post('/classes/start-class/:accessCode', async (req, res) => {
     // Update class status to live
     const result = await dbHelpers.updateClassStatus('live', accessCode);
     
-    const changes = PROJECT_ENV === 'dev' ? result.changes : result.rowCount;
-    
-    if (changes === 0) {
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Class not found' });
     }
     
@@ -473,5 +401,5 @@ io.on("connection", (socket) => {
 
 server.listen(7860, () => {
   console.log("🚀 Server running on port 7860 with WebSocket support");
-  console.log(`🗄️ Database mode: ${PROJECT_ENV}`);
+  console.log("🗄️ Using PostgreSQL database");
 });
