@@ -131,7 +131,6 @@ app.use(express.urlencoded({ extended: true }));
 const rooms = new Map(); // roomId -> Set of socket IDs
 const roomTimers = new Map(); // For auto-close functionality
 const roomModerators = new Map(); // Track moderators by room -> socket ID
-const userSessions = new Map(); // Track unique user sessions
 
 // API Routes
 app.post('/classes/start-class/:accessCode', async (req, res) => {
@@ -229,29 +228,35 @@ io.on("connection", (socket) => {
         }
       }
 
-      // Get other users in the room (excluding the new joiner)
-      const otherUsers = (await dbHelpers.getRoomParticipants(roomId)).filter(user => user.socketId !== socket.id);
-      
-      console.log(`📤 Sending user list to ${name}:`);
-      otherUsers.forEach(user => {
-        console.log(`   - ${user.name} (${user.role}) [${user.socketId}]`);
-      });
-      
-      // Send existing users to the new joiner
-      socket.emit("user-list", otherUsers);
+      // FIXED: Better timing for user list delivery
+      setTimeout(async () => {
+        // Get other users in the room (excluding the new joiner)
+        const otherUsers = (await dbHelpers.getRoomParticipants(roomId)).filter(user => user.socketId !== socket.id);
+        
+        console.log(`📤 Sending user list to ${name}:`);
+        otherUsers.forEach(user => {
+          console.log(`   - ${user.name} (${user.role}) [${user.socketId}]`);
+        });
+        
+        // Send existing users to the new joiner
+        socket.emit("user-list", otherUsers);
 
-      // Notify OTHER users that someone joined
-      const joinedUserInfo = { 
-        userId, 
-        socketId: socket.id, 
-        name,
-        role 
-      };
-      
-      console.log(`📢 Broadcasting join to ${otherUsers.length} other users in room ${roomId}`);
-      socket.to(roomId).emit("user-joined", joinedUserInfo);
+        // Notify OTHER users that someone joined (with a small delay to prevent race conditions)
+        setTimeout(() => {
+          const joinedUserInfo = { 
+            userId, 
+            socketId: socket.id, 
+            name,
+            role 
+          };
+          
+          console.log(`📢 Broadcasting join to ${otherUsers.length} other users in room ${roomId}`);
+          socket.to(roomId).emit("user-joined", joinedUserInfo);
+        }, 200);
 
-      console.log(`✅ ${name} joined room ${roomId}. Total in room: ${roomSet.size}\n`);
+        console.log(`✅ ${name} joined room ${roomId}. Total in room: ${roomSet.size}\n`);
+      }, 100); // Small delay to ensure socket is fully set up
+
     } catch (error) {
       console.error('Error in join-room:', error);
       socket.emit('error', { message: 'Failed to join room' });
@@ -293,20 +298,46 @@ io.on("connection", (socket) => {
     });
   });
 
-  // WebRTC signaling
+  // FIXED: WebRTC signaling with better logging and error handling
   socket.on("offer", ({ offer, to, from }) => {
     console.log(`📤 Relaying offer: ${from} → ${to}`);
-    io.to(to).emit("offer", { offer, from });
+    const targetSocket = io.sockets.sockets.get(to);
+    if (targetSocket) {
+      targetSocket.emit("offer", { offer, from });
+    } else {
+      console.warn(`⚠️ Target socket ${to} not found for offer relay`);
+    }
   });
 
   socket.on("answer", ({ answer, to, from }) => {
     console.log(`📤 Relaying answer: ${from} → ${to}`);
-    io.to(to).emit("answer", { answer, from });
+    const targetSocket = io.sockets.sockets.get(to);
+    if (targetSocket) {
+      targetSocket.emit("answer", { answer, from });
+    } else {
+      console.warn(`⚠️ Target socket ${to} not found for answer relay`);
+    }
   });
 
   socket.on("ice-candidate", ({ candidate, to, from }) => {
     console.log(`📤 Relaying ICE candidate: ${from} → ${to}`);
-    io.to(to).emit("ice-candidate", { candidate, from });
+    const targetSocket = io.sockets.sockets.get(to);
+    if (targetSocket) {
+      targetSocket.emit("ice-candidate", { candidate, from });
+    } else {
+      console.warn(`⚠️ Target socket ${to} not found for ICE candidate relay`);
+    }
+  });
+
+  // ADDED: Handle retry requests
+  socket.on("request-retry", ({ to, from }) => {
+    console.log(`🔄 Relaying retry request: ${from} → ${to}`);
+    const targetSocket = io.sockets.sockets.get(to);
+    if (targetSocket) {
+      targetSocket.emit("request-retry", { from });
+    } else {
+      console.warn(`⚠️ Target socket ${to} not found for retry relay`);
+    }
   });
 
   // Disconnect handling
@@ -337,6 +368,9 @@ io.on("connection", (socket) => {
           if (user && user.role === "moderator" && roomModerators.get(roomId) === socket.id) {
             console.log(`⚠️ Moderator disconnected from room ${roomId}`);
             
+            // Remove moderator tracking first
+            roomModerators.delete(roomId);
+            
             // Only start timer if there are still other users in the room
             if (roomSet.size > 0) {
               console.log(`⏰ Starting 1-minute closure timer for room ${roomId} (${roomSet.size} users remaining)`);
@@ -362,7 +396,6 @@ io.on("connection", (socket) => {
                 // Clean up
                 rooms.delete(roomId);
                 roomTimers.delete(roomId);
-                roomModerators.delete(roomId);
                 
               }, 60000); // 1 minute
               
@@ -370,11 +403,7 @@ io.on("connection", (socket) => {
             } else {
               console.log(`🗑️ Room ${roomId} is empty, cleaning up immediately`);
               rooms.delete(roomId);
-              roomModerators.delete(roomId);
             }
-            
-            // Remove moderator tracking
-            roomModerators.delete(roomId);
           }
           
           // Remove empty rooms
