@@ -298,6 +298,18 @@ io.on("connection", (socket) => {
     });
   });
 
+  // NEW: Handle raise hand events
+  socket.on("hand-raised", ({ roomId, isRaised, userName }) => {
+    console.log(`✋ ${userName} ${isRaised ? 'raised' : 'lowered'} their hand in room ${roomId}`);
+    
+    // Broadcast to all other users in the room
+    socket.to(roomId).emit("user-hand-raised", {
+      socketId: socket.id,
+      isRaised,
+      userName
+    });
+  });
+
   // FIXED: WebRTC signaling with better logging and error handling
   socket.on("offer", ({ offer, to, from }) => {
     console.log(`📤 Relaying offer: ${from} → ${to}`);
